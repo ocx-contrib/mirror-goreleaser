@@ -265,7 +265,7 @@ versions:
   # platforms) with exactly one asset each.
   min: "2.16.0"
   new_per_run: 5
-  poll_interval: "34 */6 * * *"
+  poll_interval: "53 4-23/6 * * *"
 
 tests:
   # `script:` resolves from the REPOSITORY ROOT — unlike `metadata.default` and

@@ -6,7 +6,7 @@ name: goreleaser
 
 on:
   schedule:
-    - cron: '34 */6 * * *'
+    - cron: '53 4-23/6 * * *'
   workflow_dispatch:
   push:
     branches: [main]
