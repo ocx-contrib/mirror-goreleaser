@@ -40,17 +40,6 @@ Pro is a separate, separately licensed product and is not mirrored here.
 it builds, and credentials for whatever it publishes to. `goreleaser init`,
 `check` and `jsonschema` need none of those.
 
-## Install with ocx
-
-```sh
-ocx install ocx.sh/goreleaser/goreleaser
-```
-
-```sh
-# or pin a specific version
-ocx install ocx.sh/goreleaser/goreleaser:2.17.1
-```
-
 ## Links
 
 - [GoReleaser on GitHub](https://github.com/goreleaser/goreleaser)
