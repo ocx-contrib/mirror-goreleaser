@@ -1,0 +1,331 @@
+# Single-package repository: every key this mirror needs is package-owned, so
+# there is no `mirror-base.yml` and no `extends:` chain. That is deliberate —
+# `extends:` is a SHALLOW merge of top-level keys, and `platforms:` is where it
+# bites (it carries BOTH the runner matrix and the container legs, so a child
+# that restates it to tweak one runner silently drops every `containers:`
+# entry and nothing reds). With one spec there is nothing to merge and the trap
+# does not exist. A second package here would move the genuinely repo-wide keys
+# into a base — that is a content move, not a rename, and changes no generated
+# workflow filename.
+
+name: goreleaser
+
+# Logical index package `goreleaser/goreleaser` at the physical path
+# `ghcr.io/ocx-contrib/goreleaser/goreleaser` — slash segments, never
+# hyphen-flattened. Two segments always. `goreleaser` is the project's own
+# brand as well as the org name, so the org IS the namespace. The first path
+# segment must be this repo's own GitHub owner: GITHUB_TOKEN only authorises
+# packages owned by the repository the workflow runs in.
+target:
+  registry: ghcr.io
+  repository: ocx-contrib/goreleaser/goreleaser
+
+source:
+  type: github_release
+  owner: goreleaser
+  repo: goreleaser
+  # goreleaser tags carry a "v" prefix (e.g. "v2.17.1"); the captured version
+  # does not. The bare-three-part anchor is load-bearing here rather than
+  # decorative: upstream publishes a ROLLING `nightly` tag plus dated
+  # `v2.18.0-<shorthash>-nightly` tags, all flagged prerelease=true. Each of
+  # `skip_prereleases: true` and this anchor excludes them INDEPENDENTLY —
+  # both are kept so neither is the single point of failure.
+  tag_pattern: "^v(?P<version>\\d+\\.\\d+\\.\\d+)$"
+
+skip_prereleases: true
+cascade: true
+
+# Bare semver versions (`2.17.1`) carry no `+build` segment, so the fleet
+# default applies with no exception. A cascade tag (`latest`, `2`, `2.17`)
+# re-points on every re-publish; without a build segment the new manifest would
+# reuse the bare version tag and orphan the prior digest for registry GC,
+# breaking any `@sha256:` pin in a consumer's ocx.lock.
+build_timestamp: date
+
+verify:
+  github_asset_digest: true
+
+concurrency:
+  # goreleaser is a large single Go binary: ~25 MB per compressed asset around
+  # an ~86 MB uncompressed executable, so bundling is xz-bound rather than
+  # network-bound. Bundle and push concurrency is held low on purpose.
+  max_downloads: 4
+  max_bundles: 2
+  max_pushes: 2
+  rate_limit_ms: 100
+  max_retries: 3
+  compression_threads: 0
+
+# ─── libc gate (Phase 3.5) — the evidence, not the conclusion ───────────────
+#
+# goreleaser is a single static Go binary. That is the claim; below is what was
+# measured, on BOTH declared arches at BOTH ends of the mirrored range (plus
+# the middle release on amd64), because a toolchain can change mid-series — and
+# it does here: go1.26.3 → go1.26.4 → go1.26.5 across the three tags.
+#
+#   $ file v2.16.0/linux_x86_64/goreleaser
+#   ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked,
+#     Go BuildID=…, stripped
+#   $ file v2.16.0/linux_arm64/goreleaser
+#   ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked,
+#     Go BuildID=…, stripped
+#   (same verdict for v2.17.0/linux_x86_64, v2.17.1/linux_x86_64 and
+#    v2.17.1/linux_arm64)
+#
+#   readelf -l <each> | grep -c INTERP          → 0   (all five)
+#   readelf -d <each> | grep -c NEEDED          → 0   (all five)
+#   readelf -V <each> | grep -o 'GLIBC_[0-9.]*' → (no output — no versioned
+#                                                  glibc symbol references)
+#
+# UPX RULED OUT BY MEASUREMENT, not by assumption. A UPX stub leaves no
+# PT_INTERP and no section headers, so `file` calls a packed glibc-dynamic
+# binary "statically linked" and the check above would be worthless:
+#
+#   $ readelf -h <each> | grep 'Number of section headers'
+#   Number of section headers:  16          (all five — a stub reports 0)
+#   $ strings -a <each> | grep -c '^UPX'
+#   1                                       (below the >=3 packer threshold)
+#   $ strings -a <each> | grep '^UPX'
+#   UPXs)yaml:"upx,omitempty" json:"upx,omitempty"
+#
+# That single hit is goreleaser's OWN config schema — it supports `upx` as a
+# post-build hook — not a packer signature. Real section headers plus a
+# self-referential string is a false positive, not a packed binary.
+#
+# No PT_INTERP, no DT_NEEDED, no GLIBC symbol versions, not packed. The
+# artifact requires NOTHING of the host userland, so both Linux keys are BARE —
+# no `+libc.*` suffix. `os.features` states what an artifact REQUIRES OF THE
+# HOST, not how it was built: tagging a static binary `+libc.glibc` would hide
+# it from every musl host it in fact runs on, and `+libc.musl` would hide it
+# from every glibc host. Neither is true here.
+#
+# A bare key claims universality, so it must PROVE it: the container legs below
+# are ubuntu (glibc) + alpine (musl) + fedora (a different glibc vintage) on
+# both arches. THE ALPINE LEG IS THE PROOF — drop it and the universal claim is
+# merely asserted.
+#
+# ─── No `containers[].setup` — measured, not assumed ────────────────────────
+#
+# goreleaser is a release-automation tool built around git, so the obvious
+# suspicion is that it shells out to `git` and needs it provisioned per leg
+# (none of ubuntu:24.04 / alpine:3.20 / fedora:40 ships git). MEASURED under
+# local `docker run` with the v2.17.1 linux/amd64 binary bind-mounted in, one
+# fresh mktemp dir per image:
+#
+#   ubuntu:24.04   git present? NO   fresh-init exit=0  → .goreleaser.yaml .gitignore
+#   alpine:3.20    git present? NO   fresh-init exit=0  → .goreleaser.yaml .gitignore
+#   fedora:40      git present? NO   fresh-init exit=0  → .goreleaser.yaml .gitignore
+#   (and in every image: check-ok exit=0, check-bad exit=1, --version exit=0,
+#    jsonschema exit=0)
+#
+# Every verb the smoke test uses is reached WITHOUT git. `init` writes
+# `.gitignore` itself rather than invoking git, and the smoke's `check` config
+# sets `release.disable: true`, which skips the scm pipe that IS the only
+# git-touching path (`goreleaser check` on the DEFAULT generated config does
+# fail outside a repository, with `scm releases: current folder is not a git
+# repository` — that path is deliberately not exercised).
+#
+# So no `setup:` lines are declared. That is not laziness — it is what makes
+# the bare `os.features` key mean something. Every `setup:` entry provisions
+# the leg with something the host would otherwise have to supply, and a bare
+# key claims the artifact needs NOTHING of the host. Installing git to green a
+# leg would make these legs prove strictly less.
+#
+# ─── Scope + resolution (verified on EVERY in-range release) ────────────────
+#
+# The mirrored range is exactly v2.16.0, v2.17.0 and v2.17.1 — three releases,
+# each carrying an IDENTICAL 55-asset set (re-listed per tag with
+# `gh api repos/goreleaser/goreleaser/releases/tags/<tag> --jq '.assets[].name'`,
+# not assumed from one sample). Every pattern below was matched against each of
+# those three full asset lists: EXACTLY ONE match, every time, both ways. A
+# pattern matching ZERO is silently skipped rather than reported as an error,
+# which would yield a green run with a missing platform — so this check is not
+# optional. No in-range release is asset-less, so the 2.16.0 floor needs no
+# lift.
+#
+# Asset names here are NOT version-suffixed — `goreleaser_Linux_x86_64.tar.gz`
+# is byte-identical in NAME across every release — so "does the asset agree
+# with the tag" cannot be answered from the filename. It was answered by
+# RUNNING the extracted binary from each tag:
+#
+#   $ v2.16.0/…/goreleaser --version | grep GitVersion   →  GitVersion:  2.16.0
+#   $ v2.17.0/…/goreleaser --version | grep GitVersion   →  GitVersion:  2.17.0
+#   $ v2.17.1/…/goreleaser --version | grep GitVersion   →  GitVersion:  2.17.1
+#
+# Each tag ships its own build; none re-ships a predecessor's binaries.
+#
+# THREE DISTINCT AMBIGUITY TRAPS, all defused by END-ANCHORING on the archive
+# extension AND anchoring the arch token — an OS-only anchor is not enough:
+#
+#   1. `goreleaser_Darwin_all.tar.gz` is a UNIVERSAL (fat) binary covering both
+#      darwin arches in one file. A pattern anchored only on `Darwin` matches
+#      it as a THIRD darwin candidate and the resolver hard-errors as
+#      ambiguous. The per-arch assets are preferred and `_all` is excluded by
+#      the literal arch token.
+#   2. EVERY archive has a same-named `.sbom.json` sidecar
+#      (`goreleaser_Linux_x86_64.tar.gz.sbom.json`). A prefix-matching pattern
+#      hits two assets per platform — hence the `$` on every pattern.
+#   3. The package-manager assets use a STRUCTURALLY DIFFERENT naming scheme
+#      that shares tokens with the archives: `goreleaser-2.17.1-1.x86_64.rpm`,
+#      `goreleaser_2.17.1_amd64.deb`, `goreleaser_2.17.1_x86_64.apk`,
+#      `goreleaser-2.17.1-1-x86_64.pkg.tar.zst`,
+#      `goreleaser_2.17.1_linux_amd64.flatpak`. They are excluded by
+#      EXTENSION (the anchored `\.tar\.gz$` / `\.zip$`), never by token
+#      overlap — `x86_64` and `amd64` appear on both sides of that line, and
+#      `.pkg.tar.zst` would even satisfy a naive "is it a tarball" test.
+#
+# Upstream also publishes, and this mirror deliberately does not carry:
+#   goreleaser_Linux_armv7.tar.gz     — ocx's Architecture enum has no armv7
+#   goreleaser_Linux_i386.tar.gz      — no 386
+#   goreleaser_Linux_loong64.tar.gz   — no loong64
+#   goreleaser_Linux_ppc64.tar.gz     — no ppc64
+#   goreleaser_Linux_riscv64.tar.gz   — no riscv64
+#   goreleaser_Windows_i386.zip       — no 386
+#   goreleaser_Darwin_all.tar.gz      — fat binary; superseded by the per-arch pair
+#   *.rpm / *.deb / *.apk / *.pkg.tar.zst / *.flatpak  — distro sidecars
+#   *.sbom.json, checksums.txt, checksums.txt.sigstore.json  — sidecars
+# ocx expresses exactly amd64 and arm64, so armv7/i386/loong64/ppc64/riscv64
+# are upstream assets rather than declarable platforms — nothing to gate,
+# nothing to exclude beyond not naming them.
+assets:
+  linux/amd64:
+    - "^goreleaser_Linux_x86_64\\.tar\\.gz$"
+  linux/arm64:
+    - "^goreleaser_Linux_arm64\\.tar\\.gz$"
+  # ── Pass 2 (darwin) ───────────────────────────────────────────────────────
+  # Uncommented in lockstep with the matching `platforms:` keys below. A
+  # declared platform with no resolvable asset does NOT red — it boots a real
+  # macOS/Windows runner and reports SUCCESS having tested nothing — so the
+  # asset regex and its platform key move in the SAME pass.
+  # darwin/amd64:
+  #   - "^goreleaser_Darwin_x86_64\\.tar\\.gz$"
+  # darwin/arm64:
+  #   - "^goreleaser_Darwin_arm64\\.tar\\.gz$"
+  # ── Pass 3 (windows) ──────────────────────────────────────────────────────
+  # windows/amd64:
+  #   - "^goreleaser_Windows_x86_64\\.zip$"
+  # windows/arm64:
+  #   - "^goreleaser_Windows_arm64\\.zip$"
+
+# Every archive — tarball and zip alike — is FLAT: `goreleaser`
+# (`goreleaser.exe` on Windows) sits at the archive root beside `LICENSE.md`
+# and `README.md`, with two data directories (`completions/`, `manpages/`)
+# alongside it, no wrapper directory and no `bin/`. Verified with
+# `tar tvzf` / `unzip -l` on 2.16.0 and 2.17.1, linux + darwin + windows:
+#
+#   -rw-r--r--      1085  LICENSE.md
+#   -rw-r--r--      7212  README.md
+#   -rw-r--r--     16393  completions/goreleaser.bash
+#   -rw-r--r--     10061  completions/goreleaser.fish
+#   -rw-r--r--      7892  completions/goreleaser.zsh
+#   -rw-r--r--      1603  manpages/goreleaser.1.gz
+#   -rwxr-xr-x  86950050  goreleaser
+#
+# So strip_components 0 on every platform — the binary lands at the content
+# root — and one metadata.json (PATH = ${installPath}) serves all six.
+# NOTE the two shapes that both take 0 and mean opposite things: a FLAT archive
+# (this one) keeps the binary at ${installPath}; an archive WITH a top
+# directory keeps that directory, making PATH ${installPath}/<topdir>. The
+# `tar tvzf` transcript above is what distinguishes them.
+#
+# `manpages/goreleaser.1.gz` deliberately gets NO MANPATH entry: `man` resolves
+# `$MANPATH/man<N>/<page>`, and upstream ships the page directly under
+# `manpages/` with no `man1/` level, so a MANPATH pointing there would resolve
+# nothing. Declaring it would be a wiring claim the layout cannot honour.
+asset_type:
+  type: archive
+  strip_components: 0
+
+# FORCED by the flat archive, not chosen. `bin_scan` only inspects an
+# interface-visible `${installPath}/<dir>` PATH entry, and the binary sits at
+# the archive ROOT — the two subdirectories that do exist (`completions/`,
+# `manpages/`) hold data, not executables, and pointing PATH at either would be
+# a lie. With no executable subdirectory to scan, both `auto` and `verify` fail
+# spec load at exit 65:
+#
+#   bin_scan is enabled but metadata.json declares no interface-visible
+#   ${installPath}/<dir> PATH entry — the verification would inspect no file
+#   and pass green whatever the archive contains.
+#
+# The `binaries` list in metadata.json is therefore hand-maintained, exactly as
+# that error directs. It is short and stable: `goreleaser` (`goreleaser.exe` on
+# Windows) is the only mode-0755 entry in the archive; everything else is 0644
+# data. Quoted so no YAML 1.1 reader folds the bare word into boolean `false`.
+bin_scan: "off"
+
+metadata:
+  default: metadata.json
+
+catalog:
+  logo: logo.svg
+
+versions:
+  # Assigned floor for this mirror. Every release from here up resolves both
+  # declared Linux platforms (and, from pass 2/3, both darwin and both windows
+  # platforms) with exactly one asset each.
+  min: "2.16.0"
+  new_per_run: 5
+  poll_interval: "34 */6 * * *"
+
+tests:
+  # `script:` resolves from the REPOSITORY ROOT — unlike `metadata.default` and
+  # `catalog.logo` above, which resolve against this spec's own directory.
+  - name: smoke
+    script: goreleaser/tests/smoke.star
+
+# ─── Runner + container matrix ─────────────────────────────────────────────
+platforms:
+  linux/amd64:
+    runner: ubuntu-latest
+    containers:
+      - { image: "ubuntu:24.04", shell: bash }
+      - { image: "alpine:3.20",  shell: sh }
+      - { image: "fedora:40",    shell: bash }
+  linux/arm64:
+    # arm64 container legs run natively — no qemu — so the runner arch must
+    # match the platform or the renderer reds the leg up front.
+    runner: ubuntu-24.04-arm
+    containers:
+      - { image: "ubuntu:24.04", shell: bash }
+      - { image: "alpine:3.20",  shell: sh }
+      - { image: "fedora:40",    shell: bash }
+  # ── Pass 2 (darwin) ───────────────────────────────────────────────────────
+  # darwin/amd64:
+  #   # Intel slice tested on the arm64 macos-14 runner via Rosetta 2 —
+  #   # GitHub's native macos-13 Intel pool is exhausted and deadlocks push.
+  #   runner: macos-14
+  #   prefix: ["arch", "-x86_64"]
+  # darwin/arm64:
+  #   runner: macos-14
+  #   shell: bash
+  # ── Pass 3 (windows) ──────────────────────────────────────────────────────
+  # windows/amd64:
+  #   runner: windows-latest
+  #   shell: pwsh
+  # windows/arm64:
+  #   # Native arm64 Windows runner — the amd64 pool cannot execute an ARM64
+  #   # PE, and upstream does ship goreleaser_Windows_arm64.zip on every
+  #   # in-range release, so this leg resolves an asset and must exist here or
+  #   # push reds it as missing_junit.
+  #   runner: windows-11-arm
+  #   shell: pwsh
+  #
+  # No `containers:` on darwin or windows — those runners have no Linux
+  # container engine, and the key is rejected at spec load.
+
+annotations:
+  # From the Phase 1.5 license gate:
+  #   $ gh api repos/goreleaser/goreleaser/license --jq '.license.spdx_id'
+  #   MIT
+  org.opencontainers.image.licenses: "MIT"
+
+notify:
+  discord:
+    webhook_secret: OCX_MIRROR_DISCORD_HOOK
+    user_id: "227748867204972545"  # pinged in-message on failures
+
+announce:
+  # Spelled out, not derived from target.repository — the logical name and the
+  # physical path are related by convention only.
+  package: goreleaser/goreleaser
+  fork: ocx-contrib/index
