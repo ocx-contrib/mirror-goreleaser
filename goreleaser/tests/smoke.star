@@ -49,6 +49,16 @@ r_version = ocx.run(GORELEASER, "--version")
 expect.ok(r_version)
 expect.matches(r_version.stdout, r"\d+\.\d+\.\d+")
 
+# … and the binary in this bundle is built for the platform the bundle CLAIMS.
+# goreleaser prints `Platform:  <goos>/<goarch>`, and Go's GOOS/GOARCH spellings
+# are exactly the OCI strings `str(ocx.target_platform)` produces. This is the
+# one bug class the spec-side platform-resolution gate cannot see from outside:
+# a regex that resolved the WRONG artifact into the right bundle would satisfy
+# every other assertion here. It is worth more than usual for this package —
+# `goreleaser_Darwin_all.tar.gz` (a universal fat binary) and a `.sbom.json`
+# sidecar per archive are both live ambiguity traps in the upstream asset set.
+expect.contains(r_version.stdout, str(ocx.target_platform))
+
 # ── Tier 3a: a real, observable on-disk side effect ────────────────────────
 # The generated files must not pre-exist, or the assertions below would pass
 # against something this run did not do. This is what makes the check

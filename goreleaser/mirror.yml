@@ -202,10 +202,10 @@ assets:
   darwin/arm64:
     - "^goreleaser_Darwin_arm64\\.tar\\.gz$"
   # ── Pass 3 (windows) ──────────────────────────────────────────────────────
-  # windows/amd64:
-  #   - "^goreleaser_Windows_x86_64\\.zip$"
-  # windows/arm64:
-  #   - "^goreleaser_Windows_arm64\\.zip$"
+  windows/amd64:
+    - "^goreleaser_Windows_x86_64\\.zip$"
+  windows/arm64:
+    - "^goreleaser_Windows_arm64\\.zip$"
 
 # Every archive — tarball and zip alike — is FLAT: `goreleaser`
 # (`goreleaser.exe` on Windows) sits at the archive root beside `LICENSE.md`
@@ -299,16 +299,16 @@ platforms:
     runner: macos-14
     shell: bash
   # ── Pass 3 (windows) ──────────────────────────────────────────────────────
-  # windows/amd64:
-  #   runner: windows-latest
-  #   shell: pwsh
-  # windows/arm64:
-  #   # Native arm64 Windows runner — the amd64 pool cannot execute an ARM64
-  #   # PE, and upstream does ship goreleaser_Windows_arm64.zip on every
-  #   # in-range release, so this leg resolves an asset and must exist here or
-  #   # push reds it as missing_junit.
-  #   runner: windows-11-arm
-  #   shell: pwsh
+  windows/amd64:
+    runner: windows-latest
+    shell: pwsh
+  windows/arm64:
+    # Native arm64 Windows runner — the amd64 pool cannot execute an ARM64
+    # PE, and upstream does ship goreleaser_Windows_arm64.zip on every
+    # in-range release, so this leg resolves an asset and must exist here or
+    # push reds it as missing_junit.
+    runner: windows-11-arm
+    shell: pwsh
   #
   # No `containers:` on darwin or windows — those runners have no Linux
   # container engine, and the key is rejected at spec load.
